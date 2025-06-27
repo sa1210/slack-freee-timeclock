@@ -1,14 +1,29 @@
 {
   "name": "slack-freee-timeclock",
   "version": "1.0.0",
-  "description": "Slack integration for freee HR time clock",
+  "description": "Slack integration for freee HR time clock using Cloudflare Workers",
   "main": "src/index.js",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail"
   },
-  "keywords": ["slack", "freee", "timeclock", "cloudflare-workers"],
-  "author": "Your Name",
-  "license": "MIT"
+  "keywords": [
+    "slack",
+    "freee",
+    "timeclock",
+    "cloudflare-workers",
+    "hr",
+    "automation"
+  ],
+  "author": "Your Name <your-email@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/slack-freee-timeclock.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/slack-freee-timeclock/issues"
+  },
+  "homepage": "https://github.com/yourusername/slack-freee-timeclock#readme"
 }
