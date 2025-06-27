@@ -1,6 +1,6 @@
 # Slack freee 打刻ボット
 
-Slackの特定キーワードでfreee人事労務に自動打刻を行うCloudflare Workersアプリケーション
+Slackの特定キーワード(AKASHI踏襲)でfreee人事労務に自動打刻を行うCloudflare Workersアプリケーション
 
 ## 🚀 機能
 
