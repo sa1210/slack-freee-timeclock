@@ -1,0 +1,13 @@
+name = "slack-freee-timeclock"
+main = "src/index.js"
+compatibility_date = "2024-06-27"
+
+# すべての環境で使用
+[vars]
+TARGET_CHANNEL_ID = "C06CZLP64GJ"
+
+[env.development.vars]
+TARGET_CHANNEL_ID = "C06CZLP64GJ"
+
+[env.production.vars]
+TARGET_CHANNEL_ID = "C06CZLP64GJ"
