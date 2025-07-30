@@ -1,14 +1,14 @@
-// Cloudflare Workers で動作するSlack freee打刻アプリ（ハイブリッドマッチング版）
+// Cloudflare Workers で動作するSlack freee打刻アプリ（非同期処理版）
 
-// キーワードマッピング（akashi競合回避版）
+// キーワードマッピング
 const KEYWORDS = {
   clock_in: [
-    'freee出勤', 'freee始業', 'f出勤', 'f始業',
-    '出勤', '始業', 'しゅっきん', 'しぎょう', 
+    'freee出勤', 'freee始業', 'f出勤', 'いn',
+    '出勤', 'いん', 'しゅっきん', 'いん', 
     'おはようございます', 'in'
   ],
   clock_out: [
-    'freee退勤', 'freee終業', 'f退勤', 'f終業',
+    'freee退勤', 'freee終業', 'f退勤', 'おうt',
     '退勤', '終業', 'たいきん', 'しゅうぎょう', 
     'お疲れ様', 'out'
   ],
@@ -23,55 +23,9 @@ const KEYWORDS = {
 };
 
 // freee API クライアント
-class FreeeHRClient {
-  constructor(accessToken) {
-    this.accessToken = accessToken;
-    this.baseURL = 'https://api.freee.co.jp/hr/api/v1';
-  }
+import { AutoRefreshFreeeClient } from './lib/autoRefreshClient.js';
 
-  async request(endpoint, options = {}) {
-    const url = `${this.baseURL}${endpoint}`;
-    const response = await fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json',
-        ...options.headers
-      },
-      ...options
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`freee API Error: ${response.status} ${error}`);
-    }
-
-    return response.json();
-  }
-
-  async registerTimeClock(employeeId, type, location = 'Slack') {
-    const endpoint = `/employees/${employeeId}/time_clocks`;
-    const timeClockData = {
-      type: type,
-      datetime: new Date().toISOString(),
-      location: location
-    };
-
-    return await this.request(endpoint, {
-      method: 'POST',
-      body: JSON.stringify({ time_clock: timeClockData })
-    });
-  }
-
-  async getUserInfo() {
-    return await this.request('/users/me');
-  }
-
-  async getEmployees(companyId) {
-    return await this.request(`/companies/${companyId}/employees`);
-  }
-}
-
-// Slack API クライアント
+// Slack API クライアント（非同期対応版）
 class SlackClient {
   constructor(botToken) {
     this.botToken = botToken;
@@ -109,19 +63,57 @@ class SlackClient {
     return await this.request('chat.postMessage', data);
   }
 
-  async getUserInfo(userId) {
-    return await this.request('users.info', { user: userId });
+  // 処理中メッセージを投稿
+  async postProcessingMessage(channel, action, threadTs = null) {
+    const actionName = getActionDisplayName(action);
+    const message = `⏳ ${actionName}処理中...`;
+    
+    return await this.postMessage(channel, message, threadTs);
+  }
+
+  // 成功メッセージを投稿
+  async postSuccessMessage(channel, action, result, threadTs = null) {
+    const actionName = getActionDisplayName(action);
+    
+    // freee APIのdatetimeから正しい時刻を取得
+    // freee API: "2025-07-30T17:19:00.000+09:00" (既にJST)
+    const freeeDateTime = result.employee_time_clock.datetime;
+    
+    // 文字列操作で正しい時刻を取得（タイムゾーン変換を避ける）
+    const datePart = freeeDateTime.split('T')[0]; // "2025-07-30"
+    const timePart = freeeDateTime.split('T')[1].split('.')[0]; // "17:19:00"
+    const displayDateTime = `${datePart.replace(/-/g, '/')} ${timePart}`;
+    
+    const message = `✅ ${actionName}を記録しました！\n打刻時刻: ${displayDateTime}`;
+    
+    return await this.postMessage(channel, message, threadTs);
+  }
+
+  // エラーメッセージを投稿
+  async postErrorMessage(channel, action, error, threadTs = null) {
+    const actionName = getActionDisplayName(action);
+    let message = `❌ ${actionName}の記録に失敗しました。\n`;
+    
+    if (error.message.includes('既に出勤済み')) {
+      message += '既に出勤済みです。';
+    } else if (error.message.includes('まだ出勤していない')) {
+      message += 'まだ出勤していないか、既に退勤済みです。';
+    } else if (error.message.includes('打刻の種類が正しくありません')) {
+      message += '現在の打刻状況では、この操作はできません。';
+    } else {
+      message += 'システムエラーが発生しました。';
+    }
+    
+    return await this.postMessage(channel, message, threadTs);
   }
 }
 
 // ハイブリッドマッチング機能
 class HybridMatcher {
-  constructor(freeeClient, slackClient, companyId, env) {
-    this.freeeClient = freeeClient;
-    this.slackClient = slackClient;
-    this.companyId = companyId;
+  constructor(env, loginUserEmployeeId = null) {
     this.env = env;
-    this.cache = new Map(); // キャッシュ用
+    this.loginUserEmployeeId = loginUserEmployeeId;
+    this.cache = new Map();
   }
 
   async getEmployeeIdBySlackUser(slackUserId) {
@@ -130,7 +122,7 @@ class HybridMatcher {
       return this.cache.get(slackUserId);
     }
 
-    // 1. 手動マッピングを優先チェック
+    // 手動マッピングを優先チェック
     const manualMapping = this.getManualMapping();
     if (manualMapping[slackUserId]) {
       console.log(`Found manual mapping for ${slackUserId}: ${manualMapping[slackUserId]}`);
@@ -138,18 +130,13 @@ class HybridMatcher {
       return manualMapping[slackUserId];
     }
 
-    // 2. メールアドレス自動マッチング
-    try {
-      const employeeId = await this.matchByEmail(slackUserId);
-      if (employeeId) {
-        this.cache.set(slackUserId, employeeId);
-        return employeeId;
-      }
-    } catch (error) {
-      console.error('Email matching failed:', error);
+    // ログインユーザー自身のemployee_idを使用
+    if (this.loginUserEmployeeId) {
+      console.log(`Using cached login user's employee_id: ${this.loginUserEmployeeId}`);
+      this.cache.set(slackUserId, this.loginUserEmployeeId);
+      return this.loginUserEmployeeId;
     }
 
-    // 3. マッチング失敗
     console.log(`No matching found for Slack user: ${slackUserId}`);
     return null;
   }
@@ -160,36 +147,6 @@ class HybridMatcher {
     } catch (error) {
       console.error('Failed to parse USER_MAPPING:', error);
       return {};
-    }
-  }
-
-  async matchByEmail(slackUserId) {
-    // Slackユーザー情報取得
-    const slackUser = await this.slackClient.getUserInfo(slackUserId);
-    const slackEmail = slackUser.user.profile.email;
-    
-    if (!slackEmail) {
-      console.log(`No email found for Slack user: ${slackUserId}`);
-      return null;
-    }
-
-    console.log(`Slack user email: ${slackEmail}`);
-
-    // freee従業員一覧取得
-    const employeesResponse = await this.freeeClient.getEmployees(this.companyId);
-    const employees = employeesResponse.employees || employeesResponse;
-
-    // メールアドレスでマッチング
-    const matchedEmployee = employees.find(emp => 
-      emp.email && emp.email.toLowerCase() === slackEmail.toLowerCase()
-    );
-
-    if (matchedEmployee) {
-      console.log(`Email matched employee: ${matchedEmployee.display_name} (ID: ${matchedEmployee.id})`);
-      return matchedEmployee.id;
-    } else {
-      console.log(`No freee employee found with email: ${slackEmail}`);
-      return null;
     }
   }
 }
@@ -255,8 +212,68 @@ async function verifySlackSignature(body, signingSecret, timestamp, signature) {
   return mySignatureHex === signature;
 }
 
-// メイン処理
-async function processSlackEvent(event, env) {
+// バックグラウンド打刻処理
+async function processTimeClockBackground(action, messageEvent, env) {
+  const slackClient = new SlackClient(env.SLACK_BOT_TOKEN);
+  
+  try {
+    console.log('🚀 Starting background time clock processing...');
+    
+    // 処理中メッセージを投稿
+    await slackClient.postProcessingMessage(messageEvent.channel, action, messageEvent.ts);
+    
+    // freee APIクライアント作成
+    const freeeClient = new AutoRefreshFreeeClient(env);
+
+    // 会社IDとユーザー情報を取得
+    const userInfo = await freeeClient.getUserInfo();
+    const companyId = userInfo.companies[0].id;
+    const loginUserEmployeeId = userInfo.companies[0].employee_id;
+
+    // ハイブリッドマッチャー作成
+    const matcher = new HybridMatcher(env, loginUserEmployeeId);
+
+    // 従業員IDを取得
+    const employeeId = await matcher.getEmployeeIdBySlackUser(messageEvent.user);
+    
+    if (!employeeId) {
+      console.log(`No matching employee found for Slack user: ${messageEvent.user}`);
+      
+      await slackClient.postMessage(
+        messageEvent.channel,
+        `❌ 従業員が見つかりません。\n` +
+        `• 手動マッピング: 管理者に設定を依頼してください\n` +
+        `• 自動マッチング: Slackプロフィールとfreeeのメールアドレスが一致している必要があります`,
+        messageEvent.ts
+      );
+      
+      return;
+    }
+
+    // 打刻実行
+    console.log(`Registering time clock: ${action} for employee ${employeeId}`);
+    freeeClient.cachedCompanyId = companyId;
+    const result = await freeeClient.registerTimeClock(employeeId, action);
+    
+    // 成功メッセージを投稿
+    await slackClient.postSuccessMessage(messageEvent.channel, action, result, messageEvent.ts);
+
+    console.log(`✅ Time clock registered successfully: ${action} for employee ${employeeId}`);
+
+  } catch (error) {
+    console.error('❌ Failed to process time clock:', error);
+    
+    // エラーメッセージを投稿
+    try {
+      await slackClient.postErrorMessage(messageEvent.channel, action, error, messageEvent.ts);
+    } catch (slackError) {
+      console.error('Failed to post error message to Slack:', slackError);
+    }
+  }
+}
+
+// メイン処理（非同期版）
+async function processSlackEvent(event, env, ctx) {
   // URL verification（初回設定時）
   if (event.type === 'url_verification') {
     return new Response(JSON.stringify({ challenge: event.challenge }), {
@@ -276,19 +293,17 @@ async function processSlackEvent(event, env) {
     return new Response('OK');
   }
 
-  // 対象チャンネルかチェック（デバッグ情報追加）
+  // 対象チャンネルかチェック
+  const targetChannelId = env.TARGET_CHANNEL_ID || 'C06CZLP64GJ';
   console.log('Debug channel check:', {
     messageChannel: messageEvent.channel,
     envTargetChannel: env.TARGET_CHANNEL_ID,
-    envTargetChannelType: typeof env.TARGET_CHANNEL_ID,
-    envKeys: Object.keys(env),
-    comparison: messageEvent.channel === env.TARGET_CHANNEL_ID,
-    messageChannelLength: messageEvent.channel.length,
-    envChannelLength: env.TARGET_CHANNEL_ID ? env.TARGET_CHANNEL_ID.length : 'undefined'
+    targetChannelId: targetChannelId,
+    comparison: messageEvent.channel === targetChannelId
   });
 
-  if (messageEvent.channel !== env.TARGET_CHANNEL_ID) {
-    console.log(`Ignoring message from channel: ${messageEvent.channel}, expected: ${env.TARGET_CHANNEL_ID}`);
+  if (messageEvent.channel !== targetChannelId) {
+    console.log(`Ignoring message from channel: ${messageEvent.channel}, expected: ${targetChannelId}`);
     return new Response('OK');
   }
 
@@ -299,74 +314,16 @@ async function processSlackEvent(event, env) {
     return new Response('OK');
   }
 
-  try {
-    // freee APIクライアント作成
-    const freeeClient = new FreeeHRClient(env.FREEE_ACCESS_TOKEN);
-    const slackClient = new SlackClient(env.SLACK_BOT_TOKEN);
+  console.log(`🎯 Action detected: ${action} for message: "${messageEvent.text}"`);
 
-    // 会社IDを取得
-    const userInfo = await freeeClient.getUserInfo();
-    const companyId = userInfo.companies[0].id;
+  // バックグラウンドで打刻処理を実行（非同期）
+  ctx.waitUntil(processTimeClockBackground(action, messageEvent, env));
 
-    // ハイブリッドマッチャー作成
-    const matcher = new HybridMatcher(freeeClient, slackClient, companyId, env);
-
-    // 従業員IDを取得（手動マッピング優先、次にメール自動マッチング）
-    const employeeId = await matcher.getEmployeeIdBySlackUser(messageEvent.user);
-    
-    if (!employeeId) {
-      console.log(`No matching employee found for Slack user: ${messageEvent.user}`);
-      
-      await slackClient.postMessage(
-        messageEvent.channel,
-        `❌ 従業員が見つかりません。\n` +
-        `• 手動マッピング: 管理者に設定を依頼してください\n` +
-        `• 自動マッチング: Slackプロフィールとfreeeのメールアドレスが一致している必要があります`,
-        messageEvent.ts
-      );
-      
-      return new Response('OK');
-    }
-
-    // 打刻実行
-    console.log(`Registering time clock: ${action} for employee ${employeeId}`);
-    await freeeClient.registerTimeClock(employeeId, action);
-    
-    // Slackに確認メッセージ投稿
-    const actionName = getActionDisplayName(action);
-    const confirmMessage = `✅ ${actionName}を記録しました！`;
-    
-    await slackClient.postMessage(
-      messageEvent.channel,
-      confirmMessage,
-      messageEvent.ts
-    );
-
-    console.log(`Time clock registered successfully: ${action} for employee ${employeeId}`);
-    return new Response('OK');
-
-  } catch (error) {
-    console.error('Failed to process time clock:', error);
-    
-    // エラーメッセージをSlackに投稿
-    try {
-      const slackClient = new SlackClient(env.SLACK_BOT_TOKEN);
-      const errorMessage = error.message.includes('freee API Error') 
-        ? `❌ 打刻の記録に失敗しました: ${error.message}`
-        : `❌ 打刻の記録に失敗しました: システムエラーが発生しました`;
-        
-      await slackClient.postMessage(
-        messageEvent.channel,
-        errorMessage,
-        messageEvent.ts
-      );
-    } catch (slackError) {
-      console.error('Failed to post error message to Slack:', slackError);
-    }
-    
-    return new Response('OK');
-  }
+  // 即座にSlackに200レスポンスを返す
+  return new Response('OK');
 }
+
+import { handleScheduledTokenRefresh, handleHealthCheck } from './scheduled/tokenRefresh.js';
 
 // Cloudflare Workers エントリーポイント
 export default {
@@ -417,11 +374,29 @@ export default {
       const event = JSON.parse(body);
       console.log('Event type:', event.type);
       
-      return await processSlackEvent(event, env);
+      return await processSlackEvent(event, env, ctx);
 
     } catch (error) {
       console.error('Error processing request:', error);
       return new Response('Internal Server Error', { status: 500 });
+    }
+  },
+
+  // スケジュール実行
+  async scheduled(controller, env, ctx) {
+    console.log('Scheduled event triggered:', controller.cron);
+    
+    switch (controller.cron) {
+      case '0 9 * * *': // 毎日9時: トークン期限チェック
+        await handleScheduledTokenRefresh(env);
+        break;
+      case '0 */5 * * *': // 5時間ごと: 自動トークン更新
+        break;
+      case '0 */6 * * *': // 6時間ごと: ヘルスチェック
+        await handleHealthCheck(env);
+        break;
+      default:
+        console.log('Unknown scheduled event');
     }
   }
 };
