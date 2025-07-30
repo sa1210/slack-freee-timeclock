@@ -2,12 +2,20 @@ name = "slack-freee-timeclock"
 main = "src/index.js"
 compatibility_date = "2024-06-27"
 
-# すべての環境で使用
+# KV Namespace for token storage
+kv_namespaces = [
+  { binding = "TOKEN_STORE", id = "6b953ecc3c594764a22048b87980df5f" }
+]
+
+# スケジュール実行設定（freeeトークン管理用）
+[triggers]
+crons = [
+  "0 */5 * * *",    # 5時間ごと: プロアクティブトークン更新
+  "0 9 * * *",      # 毎日9時: トークン状態チェック
+  "0 */6 * * *"     # 6時間ごと: ヘルスチェック
+]
+
+# 環境変数
 [vars]
 TARGET_CHANNEL_ID = "C06CZLP64GJ"
-
-[env.development.vars]
-TARGET_CHANNEL_ID = "C06CZLP64GJ"
-
-[env.production.vars]
-TARGET_CHANNEL_ID = "C06CZLP64GJ"
+FREEE_CLIENT_ID = "613212592308003"

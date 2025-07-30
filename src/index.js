@@ -12,7 +12,7 @@ const KEYWORDS = {
     '退勤', '終業', 'たいきん', 'しゅうぎょう', 
     'お疲れ様', 'out'
   ],
-  break_start: [
+  break_begin: [
     'freee休憩入り', 'f休憩入り',
     '休憩入り', '休憩開始', 'きゅうけいいり', 'きゅうけいかいし'
   ],
@@ -170,7 +170,7 @@ function getActionDisplayName(action) {
   const names = {
     clock_in: '出勤',
     clock_out: '退勤',
-    break_start: '休憩開始',
+    break_begin: '休憩開始',
     break_end: '休憩終了'
   };
   return names[action] || action;
