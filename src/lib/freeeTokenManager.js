@@ -7,6 +7,11 @@ export class FreeeTokenManager {
     this.clientId = env.FREEE_CLIENT_ID;
     this.clientSecret = env.FREEE_CLIENT_SECRET;
     
+    // デバッグ: CLIENT_SECRETの存在確認
+    console.log('🔍 Debug: CLIENT_SECRET exists:', !!this.clientSecret);
+    console.log('🔍 Debug: CLIENT_SECRET length:', this.clientSecret ? this.clientSecret.length : 0);
+    console.log('🔍 Debug: CLIENT_SECRET first 10 chars:', this.clientSecret ? this.clientSecret.substring(0, 10) + '...' : 'N/A');
+    
     // KVキー名
     this.ACCESS_TOKEN_KEY = 'freee_access_token';
     this.REFRESH_TOKEN_KEY = 'freee_refresh_token';
@@ -80,12 +85,24 @@ export class FreeeTokenManager {
       throw new Error('No refresh token available');
     }
 
+    // デバッグ: リフレッシュパラメータの確認
+    console.log('🔍 Debug: Refresh params:');
+    console.log('  - client_id:', this.clientId);
+    console.log('  - client_secret exists:', !!this.clientSecret);
+    console.log('  - client_secret length:', this.clientSecret ? this.clientSecret.length : 0);
+    console.log('  - refresh_token:', refreshToken ? refreshToken.substring(0, 10) + '...' : 'N/A');
+    console.log('  - redirect_uri:', 'urn:ietf:wg:oauth:2.0:oob');
+    
     const params = new URLSearchParams({
       grant_type: 'refresh_token',
       client_id: this.clientId,
       client_secret: this.clientSecret,
-      refresh_token: refreshToken
+      refresh_token: refreshToken,
+      redirect_uri: 'urn:ietf:wg:oauth:2.0:oob'  // ←修正: redirect_uri追加
     });
+    
+    // デバッグ: URLSearchParamsの内容確認
+    console.log('🔍 Debug: URLSearchParams string:', params.toString().replace(/client_secret=[^&]+/, 'client_secret=***'));
 
     try {
       const response = await fetch('https://accounts.secure.freee.co.jp/public_api/token', {
@@ -98,11 +115,19 @@ export class FreeeTokenManager {
 
       if (!response.ok) {
         const error = await response.text();
+        console.error('❌ Debug: Refresh failed response:');
+        console.error('  - Status:', response.status);
+        console.error('  - Error:', error);
+        console.error('  - Headers:', Object.fromEntries(response.headers.entries()));
         throw new Error(`Token refresh failed: ${response.status} ${error}`);
       }
 
       const tokenData = await response.json();
       console.log('✅ Token refresh successful');
+      console.log('🔍 Debug: New token data:');
+      console.log('  - access_token:', tokenData.access_token ? tokenData.access_token.substring(0, 10) + '...' : 'N/A');
+      console.log('  - refresh_token:', tokenData.refresh_token ? tokenData.refresh_token.substring(0, 10) + '...' : 'N/A');
+      console.log('  - expires_in:', tokenData.expires_in);
       
       // KVに新しいトークンを保存
       await this.saveTokens(tokenData);

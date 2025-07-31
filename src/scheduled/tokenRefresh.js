@@ -3,40 +3,23 @@
 import { FreeeTokenManager } from '../lib/freeeTokenManager.js';
 
 export async function handleScheduledTokenRefresh(env) {
-  console.log('Starting scheduled token refresh check...');
+  console.log('Starting scheduled token refresh (30分ごと)...');
   
   try {
     const tokenManager = new FreeeTokenManager(env);
-    const currentTokens = await tokenManager.getTokenFromKV();
+    const status = await tokenManager.getTokenStatus();
     
-    // トークンの残り有効期限をチェック
-    const now = Date.now();
-    const timeUntilExpiry = currentTokens.expiresAt - now;
-    const daysUntilExpiry = timeUntilExpiry / (1000 * 60 * 60 * 24);
-    
-    console.log(`Token expires in ${daysUntilExpiry.toFixed(2)} days`);
-    
-    // 7日以内に期限切れの場合は警告
-    if (daysUntilExpiry < 7) {
-      await sendSlackNotification(env, `⚠️ freeeアクセストークンが${Math.floor(daysUntilExpiry)}日で期限切れになります。手動で更新してください。`);
-    }
-    
-    // 1日以内に期限切れの場合は緊急警告
-    if (daysUntilExpiry < 1) {
-      await sendSlackNotification(env, `🚨 URGENT: freeeアクセストークンが本日期限切れになります！すぐに更新してください。`);
-    }
-    
-    // リフレッシュトークンが利用可能な場合は自動更新を試行
-    if (currentTokens.refreshToken && daysUntilExpiry < 3) {
-      try {
-        console.log('Attempting automatic token refresh...');
-        await tokenManager.refreshAccessToken();
-        await sendSlackNotification(env, '✅ freeeアクセストークンが自動で更新されました。');
-        console.log('Token refresh successful');
-      } catch (error) {
-        console.error('Automatic token refresh failed:', error);
-        await sendSlackNotification(env, `❌ freeeアクセストークンの自動更新に失敗しました: ${error.message}`);
-      }
+    console.log('🔍 Token status check:', status);
+
+    // 30分ごとに必ずリフレッシュ（最も確実）
+    console.log('🔄 Performing scheduled token refresh...');
+    try {
+      await tokenManager.refreshAccessToken();
+      console.log('✅ Token refresh successful');
+      // 成功時はSlack通知を送らない（30分ごとなのでスパム防止）
+    } catch (error) {
+      console.error('❌ Automatic token refresh failed:', error);
+      await sendSlackNotification(env, `❌ freeeアクセストークンの自動更新に失敗しました: ${error.message}`);
     }
     
   } catch (error) {

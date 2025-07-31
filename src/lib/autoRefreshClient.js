@@ -85,7 +85,51 @@ export class AutoRefreshFreeeClient {
     }
   }
 
-  // 打刻API（シンプル版 - 事前確認なし）
+  // 利用可能な打刻種別を取得（デバッグ強化版）
+  async getAvailableTimeClockTypes(employeeId) {
+    console.log('🔍 Checking available time clock types...');
+    console.log('🔍 Employee ID:', employeeId);
+    
+    try {
+      // 会社IDが必要
+      if (!this.cachedCompanyId) {
+        const userInfo = await this.getUserInfo();
+        this.cachedCompanyId = userInfo.companies[0].id;
+      }
+      
+      console.log('🔍 Company ID for available types:', this.cachedCompanyId);
+      
+      // 現在の日時情報をデバッグ出力
+      const now = new Date();
+      const jstTime = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+      console.log('🔍 Current time (JST):', jstTime.toLocaleString('ja-JP'));
+      console.log('🔍 Current time (ISO):', jstTime.toISOString());
+      
+      const params = new URLSearchParams({
+        company_id: this.cachedCompanyId
+      });
+      
+      console.log('🔍 Request params:', params.toString());
+      
+      const response = await this.makeRequest(`/employees/${employeeId}/time_clocks/available_types?${params}`);
+      
+      console.log('✅ Available time clock types response:');
+      console.log('  - available_types:', response.available_types);
+      console.log('  - base_date:', response.base_date);
+      console.log('  - full response:', JSON.stringify(response, null, 2));
+      
+      return response;
+    } catch (error) {
+      console.error('❌ Failed to get available types:', error);
+      console.error('❌ Error details:', {
+        message: error.message,
+        employeeId: employeeId,
+        companyId: this.cachedCompanyId
+      });
+      throw error;
+    }
+  }
+  // 朝5時リセット機能付き打刻API
   async registerTimeClock(employeeId, type, location = 'Slack') {
     console.log(`Starting registerTimeClock for employee ${employeeId}, type: ${type}`);
     
@@ -98,6 +142,9 @@ export class AutoRefreshFreeeClient {
       }
       const companyId = this.cachedCompanyId;
       console.log('Company ID:', companyId);
+      
+      // available_typesチェックは削除（base_dateベースの打刻なので不要）
+      console.log('🚀 Proceeding with time clock registration without pre-check...');
       
       // 日本時間での日付取得
       const now = new Date();
@@ -132,11 +179,16 @@ export class AutoRefreshFreeeClient {
       console.error('❌ Time clock registration failed:', error);
       
       // freee APIエラーメッセージを分析して適切なメッセージに変換
-      if (error.message.includes('打刻の種類が正しくありません')) {
+      if (error.message.includes('打刻の種類が正しくありません') || 
+          error.message.includes('ありません')) {
         if (type === 'clock_in') {
           throw new Error('既に出勤済みです。');
         } else if (type === 'clock_out') {
           throw new Error('まだ出勤していないか、既に退勤済みです。');
+        } else if (type === 'break_begin') {
+          throw new Error('まだ出勤していないか、既に休憩中です。');
+        } else if (type === 'break_end') {
+          throw new Error('休憩を開始していません。');
         } else {
           throw new Error('現在の打刻状況では、この操作はできません。');
         }
@@ -144,6 +196,17 @@ export class AutoRefreshFreeeClient {
       
       throw error;
     }
+  }
+  
+  // アクション表示名取得
+  getActionDisplayName(action) {
+    const names = {
+      clock_in: '出勤',
+      clock_out: '退勤',
+      break_begin: '休憩開始',
+      break_end: '休憩終了'
+    };
+    return names[action] || action;
   }
 
   // ユーザー情報取得

@@ -108,17 +108,20 @@ class SlackClient {
   }
 }
 
-// ハイブリッドマッチング機能
+// ハイブリッドマッチング機能（メールアドレス自動マッチング対応）
 class HybridMatcher {
-  constructor(env, loginUserEmployeeId = null) {
+  constructor(env, freeeClient, loginUserEmployeeId = null) {
     this.env = env;
+    this.freeeClient = freeeClient;
     this.loginUserEmployeeId = loginUserEmployeeId;
     this.cache = new Map();
+    this.employeeCache = null; // freee従業員リストキャッシュ
   }
 
   async getEmployeeIdBySlackUser(slackUserId) {
     // キャッシュから確認
     if (this.cache.has(slackUserId)) {
+      console.log(`Found cached mapping for ${slackUserId}: ${this.cache.get(slackUserId)}`);
       return this.cache.get(slackUserId);
     }
 
@@ -130,15 +133,154 @@ class HybridMatcher {
       return manualMapping[slackUserId];
     }
 
-    // ログインユーザー自身のemployee_idを使用
+    // 自動マッチング: メールアドレスベース
+    console.log(`🔍 Attempting automatic matching for Slack user: ${slackUserId}`);
+    const employeeId = await this.attemptEmailMatching(slackUserId);
+    if (employeeId) {
+      console.log(`✅ Auto-matched ${slackUserId} to employee ${employeeId}`);
+      this.cache.set(slackUserId, employeeId);
+      return employeeId;
+    }
+
+    // フォールバック: ログインユーザー自身のemployee_idを使用
     if (this.loginUserEmployeeId) {
-      console.log(`Using cached login user's employee_id: ${this.loginUserEmployeeId}`);
+      console.log(`Using cached login user's employee_id as fallback: ${this.loginUserEmployeeId}`);
       this.cache.set(slackUserId, this.loginUserEmployeeId);
       return this.loginUserEmployeeId;
     }
 
-    console.log(`No matching found for Slack user: ${slackUserId}`);
+    console.log(`❌ No matching found for Slack user: ${slackUserId}`);
     return null;
+  }
+
+  // メールアドレスベース自動マッチング
+  async attemptEmailMatching(slackUserId) {
+    try {
+      // Slackユーザーのメールアドレス取得
+      const slackEmail = await this.getSlackUserEmail(slackUserId);
+      if (!slackEmail) {
+        console.log(`⚠️ Could not get email for Slack user: ${slackUserId}`);
+        return null;
+      }
+      console.log(`📧 Slack user email: ${slackEmail}`);
+
+      // 🔧 特別処理: sa@3bitter.com → sa2@3bitter.com のハードコードマッチング
+      if (slackEmail.toLowerCase() === 'sa@3bitter.com') {
+        console.log(`🔧 Special hardcoded mapping: sa@3bitter.com -> sa2@3bitter.com`);
+        // sa2@3bitter.com のemployee_idを直接検索
+        const employees = await this.getFreeeEmployees();
+        const saEmployee = employees?.find(emp => 
+          emp.email && emp.email.toLowerCase() === 'sa2@3bitter.com'
+        );
+        if (saEmployee) {
+          console.log(`✅ Found sa2@3bitter.com employee: ${saEmployee.display_name} (ID: ${saEmployee.id})`);
+          return saEmployee.id.toString();
+        } else {
+          console.log(`❌ Could not find sa2@3bitter.com in freee employees`);
+        }
+      }
+
+      // freee従業員一覧を取得（キャッシュ利用）
+      const employees = await this.getFreeeEmployees();
+      if (!employees || employees.length === 0) {
+        console.log(`⚠️ No freee employees found`);
+        return null;
+      }
+
+      // 通常のメールアドレスでマッチング
+      const matchedEmployee = employees.find(emp => {
+        const freeeEmail = emp.email;
+        if (!freeeEmail) return false;
+        
+        // 大文字小文字を無視して比較
+        const match = freeeEmail.toLowerCase() === slackEmail.toLowerCase();
+        if (match) {
+          console.log(`🎯 Email match found: ${slackEmail} -> ${emp.display_name} (ID: ${emp.id})`);
+        }
+        return match;
+      });
+
+      if (matchedEmployee) {
+        return matchedEmployee.id.toString();
+      } else {
+        console.log(`❌ No email match found for: ${slackEmail}`);
+        console.log(`Available freee emails: ${employees.map(e => e.email).filter(e => e).join(', ')}`);
+        return null;
+      }
+
+    } catch (error) {
+      console.error(`❌ Email matching failed for ${slackUserId}:`, error);
+      return null;
+    }
+  }
+
+  // Slackユーザーのメールアドレス取得
+  async getSlackUserEmail(slackUserId) {
+    try {
+      const response = await fetch(`https://slack.com/api/users.info?user=${slackUserId}`, {
+        headers: {
+          'Authorization': `Bearer ${this.env.SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      });
+
+      const data = await response.json();
+      if (!data.ok) {
+        console.error(`Slack API error:`, data.error);
+        return null;
+      }
+
+      const email = data.user?.profile?.email;
+      if (!email) {
+        console.log(`⚠️ No email found in Slack profile for user: ${slackUserId}`);
+        return null;
+      }
+
+      return email;
+    } catch (error) {
+      console.error(`Failed to get Slack user email:`, error);
+      return null;
+    }
+  }
+
+  // freee従業員一覧取得（キャッシュ付き）
+  async getFreeeEmployees() {
+    if (this.employeeCache) {
+      console.log(`📝 Using cached freee employees (${this.employeeCache.length} employees)`);
+      return this.employeeCache;
+    }
+
+    try {
+      console.log(`🔍 Fetching freee employees...`);
+      const companyId = this.freeeClient.cachedCompanyId;
+      if (!companyId) {
+        console.error(`❌ No company ID available`);
+        return null;
+      }
+
+      const result = await this.freeeClient.getEmployees(companyId);
+      
+      // 🔧 バグ修正: freee APIレスポンスは配列が直接返される
+      // result.employees ではなく result が配列
+      const employees = Array.isArray(result) ? result : (result.employees || []);
+      
+      console.log(`📝 Fetched ${employees.length} freee employees`);
+      employees.forEach(emp => {
+        console.log(`  - ${emp.display_name} (ID: ${emp.id}, Email: ${emp.email || 'N/A'})`);
+      });
+
+      // キャッシュに保存（5分間有効）
+      this.employeeCache = employees;
+      setTimeout(() => {
+        this.employeeCache = null;
+        console.log(`🗑️ Employee cache expired`);
+      }, 5 * 60 * 1000);
+
+      return employees;
+    } catch (error) {
+      console.error(`❌ Failed to fetch freee employees:`, error);
+      return null;
+    }
   }
 
   getManualMapping() {
@@ -230,8 +372,11 @@ async function processTimeClockBackground(action, messageEvent, env) {
     const companyId = userInfo.companies[0].id;
     const loginUserEmployeeId = userInfo.companies[0].employee_id;
 
-    // ハイブリッドマッチャー作成
-    const matcher = new HybridMatcher(env, loginUserEmployeeId);
+    // ハイブリッドマッチャー作成（freeeClientを渡す）
+    const matcher = new HybridMatcher(env, freeeClient, loginUserEmployeeId);
+
+    // ✅ Company IDをキャッシュに設定（マッチング前に必要）
+    freeeClient.cachedCompanyId = companyId;
 
     // 従業員IDを取得
     const employeeId = await matcher.getEmployeeIdBySlackUser(messageEvent.user);
@@ -252,7 +397,6 @@ async function processTimeClockBackground(action, messageEvent, env) {
 
     // 打刻実行
     console.log(`Registering time clock: ${action} for employee ${employeeId}`);
-    freeeClient.cachedCompanyId = companyId;
     const result = await freeeClient.registerTimeClock(employeeId, action);
     
     // 成功メッセージを投稿
@@ -387,16 +531,20 @@ export default {
     console.log('Scheduled event triggered:', controller.cron);
     
     switch (controller.cron) {
-      case '0 9 * * *': // 毎日9時: トークン期限チェック
+      case '*/30 * * * *': // 30分ごと: トークンリフレッシュ
+        console.log('🔄 Running 30-minute token refresh');
         await handleScheduledTokenRefresh(env);
         break;
-      case '0 */5 * * *': // 5時間ごと: 自動トークン更新
+      case '0 9 * * *': // 毎日9時: トークン期限チェック
+        console.log('🌅 Running daily 9am token check');
+        await handleScheduledTokenRefresh(env);
         break;
       case '0 */6 * * *': // 6時間ごと: ヘルスチェック
+        console.log('💰 Running 6-hour health check');
         await handleHealthCheck(env);
         break;
       default:
-        console.log('Unknown scheduled event');
+        console.log('Unknown scheduled event:', controller.cron);
     }
   }
 };
